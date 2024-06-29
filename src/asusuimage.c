@@ -399,20 +399,144 @@ uint32_t get_timestamp(void)
 	return (uint32_t)fixed_timestamp;
 }
 
+static int show_info(char *img, size_t img_size)
+{
+	tail_footer_t * foot;
+	image_header_t *hdr;
+	int i;
+
+	/* Assume valid, already validated early in process_image */
+	hdr = (image_header_t *)img;
+	foot = (tail_footer_t *)(img + img_size - sizeof(tail_footer_t));
+
+	if (ntohl(hdr->ih_magic) != IH_MAGIC) {
+		free(img);
+		ERR("Incorrect image: \"%s\" magic must be %08X", g_opt.imagefn, IH_MAGIC);
+	}
+
+	g_opt.trx_ver = 0;
+	if (ntohl(foot->magic) == g_opt.magic)
+		g_opt.trx_ver = 3;  /* tail with magic = DEF_ASUS_TAIL_MAGIC */
+
+	if (ntohl(hdr->tail.trx2.fs_offset) >> 24 == FS_OFFSET_PREFIX) {
+		g_opt.trx_ver = 1;  /* hdr1 */
+
+		for (i = 0; i < sizeof(hdr->tail.trx1.prod_name); i++) {
+			if (hdr->tail.trx1.prod_name[i] >= 0x7F)
+				g_opt.trx_ver = 2;  /* hdr2 */
+		}
+
+		if (hdr->tail.trx2.sn >= 380 && hdr->tail.trx2.sn <= 490)
+			g_opt.trx_ver = 2;  /* hdr2 */
+	}
+
+	DBG("detect trx version = %d \n", g_opt.trx_ver);
+	switch(g_opt.trx_ver) {
+	case 1:
+		free(img);
+		ERR("Formart HDR1 currently not supported");
+		break;
+	case 2:
+		uint32_t data_size, fdt_size, fs_size, fs_offset = 0;
+		const uint32_t hsz = sizeof(image_header_t);
+		trx2_t *trx = &hdr->tail.trx2;
+		uint8_t fs_key, kernel_key, key;
+		uint32_t sn, en, xx = 0;
+		size_t buf_size = 12;
+		uint32_t *fs_data;
+		uint8_t *buf;
+
+		data_size = (uint32_t)ntohl(hdr->ih_size);
+		sn = le16_to_cpu(trx->sn);
+		en = le16_to_cpu(trx->en);
+
+		if (en < 20000 && sn >= 386)
+			en += 0x10000;
+
+		DBG("hdr2.sn: %u (0x%04X) \n", sn, sn);
+		DBG("hdr2.en: %u (0x%04X) \n", en, le16_to_cpu(trx->en));
+		DBG("hdr2.key: 0x%02X \n", trx->key);
+		buf = trx->unk;
+		for (size_t i = 0; i < buf_size; i += 2) {
+			if (buf[0] == FS_OFFSET_PREFIX && (buf[3] & 3) == 0) {
+				xx = (buf[3] << 24) | (buf[2] << 16) | (buf[1] << 8) | (xx && 0xFF);
+				fs_offset = ntohl(xx);
+				buf += 2;
+			}
+			buf += 2;
+		}
+		DBG("fs_offset: 0x%08X \n", fs_offset);
+		if (fs_offset + 128 > img_size)
+			ERR("Incorrect fs_offset!");
+
+		fs_data = (uint32_t *)(img + fs_offset);
+		DBG("fs_data: %08X %08X \n", ntohl(fs_data[0]), ntohl(fs_data[1]));
+		fs_size = hsz + data_size - fs_offset;
+		DBG("fs_size: 0x%X bytes \n", fs_size);
+		fs_key = img[fs_offset + fs_size / 2];
+		kernel_key = img[fs_offset / 2];
+		DBG("fs_key: 0x%02X   kernel_key: 0x%02X \n", fs_key, kernel_key);
+		if (fs_key) {
+			key = kernel_key + ~fs_key;
+		} else {
+			key = (kernel_key % 3) - 3;
+		}
+		DBG("key = 0x%02X \n", key);
+		if (ntohl(fs_data[0]) == FDT_MAGIC) {
+			DBG("fdt_offset: 0x%08X \n", fs_offset);
+			fdt_size = ntohl(fs_data[1]);
+			DBG("fdt_size: 0x%X bytes \n", fdt_size);
+			fs_offset += ROUNDUP(fdt_size, 64);
+			DBG("fs_offset: 0x%08X \n", fs_offset);
+			fs_size -= ROUNDUP(fdt_size, 64);
+			DBG("fs_size: 0x%X bytes \n", fs_size);
+		}
+		break;
+	case 3:
+		uint16_t fcrc, fcrc_c, checksum_c;
+		tail_content_t *cont;
+		uint32_t cont_len;
+
+		DBG("tail: footer size = 0x%lX  (%lu) \n", sizeof(tail_footer_t), sizeof(tail_footer_t));
+		DBG("tail: footer magic: 0x%X \n", ntohl(foot->magic));
+
+		cont_len = foot->clen[0] << 24 | foot->clen[1] << 16 | foot->clen[2];
+		DBG("tail: type = %X, flags = %X, content len = 0x%06X \n", foot->type, foot->flags, cont_len);
+
+		fcrc = foot->fcrc;
+		foot->fcrc = 0;
+		fcrc_c = asus_hash16(foot, sizeof(*foot));
+		DBG("tail: fcrc = %04X  (%04X) \n", ntohs(fcrc), fcrc_c);
+
+		cont = (tail_content_t *)((char *)foot - cont_len);
+		checksum_c = asus_hash16(cont, sizeof(*cont));
+		DBG("cont: checksum = %04X  (%04X) \n", ntohs(foot->checksum), checksum_c);
+
+		DBG("cont: buildno: %u, extendno: %u \n", ntohs(cont->buildno), ntohl(cont->extendno));
+		DBG("cont: r16: 0x%08X, r32: 0x%08X \n", ntohs(cont->r16), ntohl(cont->r32));
+		break;
+	default:
+		free(img);
+		ERR("Input image is not compatible with AsusWRT");
+	}
+
+	free(img);
+	return 0;
+}
+
 static
 int process_image(void)
 {
 	const uint32_t hsz = sizeof(image_header_t);
 	uint32_t vol_offset[VOL_COUNT + 1] = { 0 };
-	uint32_t i, data_size, data_crc_c, fs_offset = 0, vol_count = 0, sn, en,
-	*fs_data, fs_size, xx = 0, fdt_size, *vol_size, xoffset, *fdt,
+	uint32_t i, data_size, data_crc_c, fs_offset = 0, vol_count = 0,
+	*fs_data, fs_size, fdt_size, *vol_size, xoffset, *fdt,
 	cur_fdt_offset, new_fdt_offset, new_fs_offset, pad,
 	hsqs_offset, hsqs_size, *hsqs_data, cont_len;
 	uint32_t __attribute__ ((unused)) fdt_offset;
-	size_t img_size = 0, max_prod_len, buf_size = 12, new_img_size,
+	size_t img_size = 0, max_prod_len, new_img_size,
 	new_data_size, wlen;
-	uint8_t *buf, fs_key, kernel_key, key;
-	uint16_t fcrc, fcrc_c, checksum_c;
+	uint8_t fs_key, kernel_key, key;
 	char *img, *img_end, *prod_name;
 	image_header_t *hdr, orig_hdr;
 	tail_content_t *cont;
@@ -424,11 +548,11 @@ int process_image(void)
 	if (!img)
 		ERR("Can't load file %s", g_opt.imagefn);
 
+	if (g_opt.show_info)
+		return show_info(img, img_size);
+
 	hdr = (image_header_t *)img;
 	if (ntohl(hdr->ih_magic) != IH_MAGIC) {
-		if (g_opt.show_info)
-			ERR("Incorrect image: \"%s\" magic must be %08X", g_opt.imagefn, IH_MAGIC);
-
 		memmove(img + hsz, img, img_size);
 		memset(hdr, 0, hsz);
 		hdr->ih_magic = htonl(IH_MAGIC);
@@ -455,99 +579,25 @@ int process_image(void)
 	orig_hdr = *hdr;
 	img_end = img + img_size;
 
-	if (g_opt.show_info) {
-		g_opt.trx_ver = 0;
-		tail_footer_t * foot = (tail_footer_t *)(img_end - sizeof(tail_footer_t));
-		if (ntohl(foot->magic) == g_opt.magic)
-			g_opt.trx_ver = 3;  // tail with magic = DEF_ASUS_TAIL_MAGIC
-
-		if (ntohl(hdr->tail.trx2.fs_offset) >> 24 == FS_OFFSET_PREFIX) {
-			g_opt.trx_ver = 1;  // hdr1
-
-			for (i = 0; i < sizeof(hdr->tail.trx1.prod_name); i++) {
-				if (hdr->tail.trx1.prod_name[i] >= 0x7F)
-					g_opt.trx_ver = 2;  // hdr2
-			}
-
-			if (hdr->tail.trx2.sn >= 380 && hdr->tail.trx2.sn <= 490)
-				g_opt.trx_ver = 2;  // hdr2
-		}
-
-		if (g_opt.trx_ver == 0)
-			ERR("Input image is not compatible with AsusWRT");
-
-		DBG("detect trx version = %d \n", g_opt.trx_ver);
-		if (g_opt.trx_ver == 1)
-			ERR("Formart HDR1 currently not supported");
-	} else {
-		memset(&hdr->tail.trx1, 0, sizeof(hdr->tail.trx1));
-		prod_name = hdr->tail.trx2.prod_name;
-		max_prod_len = sizeof(hdr->tail.trx2.prod_name);
-		if (g_opt.trx_ver == 3) {
-			prod_name = hdr->tail.trx3.prod_name;
-			max_prod_len = sizeof(hdr->tail.trx3.prod_name);
-		}
-
-		if (g_opt.prod_name[0]) {
-			strncpy(prod_name, g_opt.prod_name, max_prod_len);
-		} else {
-			strncpy(prod_name, (const char *)&orig_hdr.kernel_ver, max_prod_len);
-		}
-		hdr->kernel_ver = g_opt.kernel_ver;
-		hdr->fs_ver = g_opt.fs_ver;
+	memset(&hdr->tail.trx1, 0, sizeof(hdr->tail.trx1));
+	prod_name = hdr->tail.trx2.prod_name;
+	max_prod_len = sizeof(hdr->tail.trx2.prod_name);
+	if (g_opt.trx_ver == 3) {
+		prod_name = hdr->tail.trx3.prod_name;
+		max_prod_len = sizeof(hdr->tail.trx3.prod_name);
 	}
+
+	if (g_opt.prod_name[0]) {
+		strncpy(prod_name, g_opt.prod_name, max_prod_len);
+	} else {
+		strncpy(prod_name, (const char *)&orig_hdr.kernel_ver, max_prod_len);
+	}
+	hdr->kernel_ver = g_opt.kernel_ver;
+	hdr->fs_ver = g_opt.fs_ver;
+
 
 	if (g_opt.trx_ver == 2) {
 		trx = &hdr->tail.trx2;
-
-		if (g_opt.show_info) {
-			sn = le16_to_cpu(trx->sn);
-			en = le16_to_cpu(trx->en);
-
-			if (en < 20000 && sn >= 386)
-				en += 0x10000;
-
-			DBG("hdr2.sn: %u (0x%04X) \n", sn, sn);
-			DBG("hdr2.en: %u (0x%04X) \n", en, le16_to_cpu(trx->en));
-			DBG("hdr2.key: 0x%02X \n", trx->key);
-			buf = trx->unk;
-			for (size_t i = 0; i < buf_size; i += 2) {
-				if (buf[0] == FS_OFFSET_PREFIX && (buf[3] & 3) == 0) {
-					xx = (buf[3] << 24) | (buf[2] << 16) | (buf[1] << 8) | (xx && 0xFF);
-					fs_offset = ntohl(xx);
-					buf += 2;
-				}
-				buf += 2;
-			}
-			DBG("fs_offset: 0x%08X \n", fs_offset);
-			if (fs_offset + 128 > img_size)
-				ERR("Incorrect fs_offset!");
-
-			fs_data = (uint32_t *)(img + fs_offset);
-			DBG("fs_data: %08X %08X \n", ntohl(fs_data[0]), ntohl(fs_data[1]));
-			fs_size = hsz + data_size - fs_offset;
-			DBG("fs_size: 0x%X bytes \n", fs_size);
-			fs_key = img[fs_offset + fs_size / 2];
-			kernel_key = img[fs_offset / 2];
-			DBG("fs_key: 0x%02X   kernel_key: 0x%02X \n", fs_key, kernel_key);
-			if (fs_key) {
-				key = kernel_key + ~fs_key;
-			} else {
-				key = (kernel_key % 3) - 3;
-			}
-			DBG("key = 0x%02X \n", key);
-			if (ntohl(fs_data[0]) == FDT_MAGIC) {
-				DBG("fdt_offset: 0x%08X \n", fs_offset);
-				fdt_size = ntohl(fs_data[1]);
-				DBG("fdt_size: 0x%X bytes \n", fdt_size);
-				fs_offset += ROUNDUP(fdt_size, 64);
-				DBG("fs_offset: 0x%08X \n", fs_offset);
-				fs_size -= ROUNDUP(fdt_size, 64);
-				DBG("fs_size: 0x%X bytes \n", fs_size);
-			}
-			free(img);
-			return 0;
-		}
 
 		if (hdr->ih_type == IH_TYPE_MULTI) {
 			DBG("detect image with type: IH_TYPE_MULTI \n");
@@ -656,28 +706,6 @@ int process_image(void)
 		cont = NULL;
 		foot = NULL;
 
-		if (g_opt.show_info) {
-			foot = (tail_footer_t *)(img_end - sizeof(tail_footer_t));
-			DBG("tail: footer size = 0x%lX  (%lu) \n", sizeof(tail_footer_t), sizeof(tail_footer_t));
-			DBG("tail: footer magic: 0x%X \n", ntohl(foot->magic));
-
-			cont_len = foot->clen[0] << 24 | foot->clen[1] << 16 | foot->clen[2];
-			DBG("tail: type = %X, flags = %X, content len = 0x%06X \n", foot->type, foot->flags, cont_len);
-
-			fcrc = foot->fcrc;
-			foot->fcrc = 0;
-			fcrc_c = asus_hash16(foot, sizeof(*foot));
-			DBG("tail: fcrc = %04X  (%04X) \n", ntohs(fcrc), fcrc_c);
-
-			cont = (tail_content_t *)((char *)foot - cont_len);
-			checksum_c = asus_hash16(cont, sizeof(*cont));
-			DBG("cont: checksum = %04X  (%04X) \n", ntohs(foot->checksum), checksum_c);
-
-			DBG("cont: buildno: %u, extendno: %u \n", ntohs(cont->buildno), ntohl(cont->extendno));
-			DBG("cont: r16: 0x%08X, r32: 0x%08X \n", ntohs(cont->r16), ntohl(cont->r32));
-			free(img);
-			return 0;
-		}
 		hdr->tail.trx3.unk1 = htonl(0x3000);  // unknown value
 
 		cont_len = img_size - hsz - data_size + sizeof(tail_content_t);
