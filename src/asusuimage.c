@@ -18,6 +18,7 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <byteswap.h>
+#include <zlib.h> /* crc32 */
 
 /* Various defines picked from U-boot */
 
@@ -176,22 +177,6 @@ void fatal_error(const char * fmtstr, ...)
 #define ERR(fmtstr, ...) fatal_error(fmtstr, ## __VA_ARGS__)
 
 static
-uint32_t crc32(const void * data, size_t length, uint32_t initval)
-{
-	uint32_t crc = ~initval;
-	uint8_t * current = (uint8_t *) data;
-	uint32_t j;
-
-	while (length--) {
-		crc ^= *current++;
-
-		for (j = 0; j < 8; j++)
-			crc = (crc >> 1) ^ ((-(int32_t)(crc & 1)) & 0xEDB88320);
-	}
-	return ~crc; // same as crc ^ 0xFFFFFFFF
-}
-
-static
 uint16_t asus_hash16(const void * data, size_t length)
 {
 	uint16_t * current = (uint16_t *) data;
@@ -210,12 +195,12 @@ void update_iheader_crc(image_header_t * hdr, const void * data, size_t data_siz
 		data = (const void *)((char *)hdr + sizeof(image_header_t));
 
 	// Calculate payload checksum
-	hdr->ih_dcrc = htonl(crc32(data, data_size, 0));
+	hdr->ih_dcrc = htonl(crc32(0, data, data_size));
 	hdr->ih_size = htonl(data_size);
 
 	// Calculate header checksum
 	hdr->ih_hcrc = 0;
-	hdr->ih_hcrc = htonl(crc32(hdr, sizeof(image_header_t), 0));
+	hdr->ih_hcrc = htonl(crc32(0, (const void *)hdr, sizeof(image_header_t)));
 }
 
 static
@@ -462,7 +447,7 @@ int process_image(void)
 	if (data_size + hsz > img_size)
 		ERR("Bad size: \"%s\" is no valid content size", g_opt.imagefn);
 
-	data_crc_c = crc32(img + hsz, data_size, 0);
+	data_crc_c = crc32(0, (const unsigned char *)(img + hsz), data_size);
 	DBG("data: crc = %08X  (%08X) \n", ntohl(hdr->ih_dcrc), data_crc_c);
 
 	DBG("image type: %d \n", (int)hdr->ih_type);
