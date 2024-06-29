@@ -517,11 +517,12 @@ int process_image(void)
 	hsqs_offset, hsqs_size, *hsqs_data, cont_len;
 	uint32_t __attribute__ ((unused)) fdt_offset;
 	size_t img_size = 0, max_prod_len, new_img_size,
-	new_data_size, wlen;
-	uint8_t fs_key, kernel_key, key;
+	  new_data_size, wlen;
 	char *img, *img_end, *prod_name;
-	image_header_t *hdr, orig_hdr;
+	uint8_t fs_key, kernel_key, key;
+	const char *prod_name_str;
 	tail_content_t *cont;
+	image_header_t *hdr;
 	tail_footer_t *foot;
 	trx2_t *trx;
 	FILE *fp;
@@ -558,7 +559,6 @@ int process_image(void)
 
 	DBG("image type: %d \n", (int)hdr->ih_type);
 
-	orig_hdr = *hdr;
 	img_end = img + img_size;
 
 	memset(&hdr->tail.trx1, 0, sizeof(hdr->tail.trx1));
@@ -572,11 +572,11 @@ int process_image(void)
 		max_prod_len = sizeof(hdr->tail.trx3.prod_name);
 	}
 
-	if (g_opt.prod_name[0]) {
-		strncpy(prod_name, g_opt.prod_name, max_prod_len);
-	} else {
-		strncpy(prod_name, (const char *)&orig_hdr.kernel_ver, max_prod_len);
-	}
+	prod_name_str = (const char *)&hdr->kernel_ver;
+	if (g_opt.prod_name[0])
+		prod_name_str = g_opt.prod_name;
+
+	strncpy(prod_name, prod_name_str, max_prod_len);
 	hdr->kernel_ver = g_opt.kernel_ver;
 	hdr->fs_ver = g_opt.fs_ver;
 
@@ -587,8 +587,10 @@ int process_image(void)
 		if (hdr->ih_type == IH_TYPE_MULTI) {
 			DBG("detect image with type: IH_TYPE_MULTI \n");
 			vol_size = (uint32_t *)(img + hsz);
-			if (vol_size[0] == 0)
+			if (vol_size[0] == 0) {
+				free(img);
 				ERR("Multi image does not contain volumes");
+			}
 
 			for (uint32_t i = 0; i <= VOL_COUNT; i++) {
 				if (vol_size[i] == 0)
@@ -597,36 +599,42 @@ int process_image(void)
 			}
 			DBG("Multi image: volumes count = %u \n", vol_count);
 
-			if (vol_count > VOL_COUNT)
+			if (vol_count > VOL_COUNT) {
+				free(img);
 				ERR("Multi image contains too many volumes");
+			}
 
 			xoffset = hsz + sizeof(uint32_t) * (vol_count + 1);
 			for (i = 0; i < vol_count; i++) {
 				xoffset = ROUNDUP(xoffset, 4);
 				vol_offset[i] = xoffset;
 				DBG("Multi image: volume %u has offset = 0x%08X \n", i, xoffset);
-				if (be32toh(vol_size[i]) > 0x4FFFFFF)
-			    	ERR("Multi image contain volume %u with huge size", i);
+				if (be32toh(vol_size[i]) > 0x4FFFFFF) {
+					free(img);
+			    		ERR("Multi image contain volume %u with huge size", i);
+				}
 
 				xoffset += be32toh(vol_size[i]);
 			}
-			if (xoffset > img_size)
+			if (xoffset > img_size) {
+				free(img);
 				ERR("Multi image contain incorrect img-size header");
+			}
 
 			fdt = (uint32_t *)(img + vol_offset[VOL_FLATDT]);
 			if (vol_offset[VOL_FLATDT] && be32toh(fdt[0]) == FDT_MAGIC) {
 				if (hdr->ih_arch == IH_ARCH_ARM64 && (vol_offset[VOL_FLATDT] & 7) != 0) {
-				// for ARM64 offset of FlatDT must be 8-bytes align
-				cur_fdt_offset = vol_offset[VOL_FLATDT];
-				new_fdt_offset = vol_offset[VOL_FLATDT] + 4;
-				memmove(img + new_fdt_offset, img + cur_fdt_offset, img_size - cur_fdt_offset);
-				memset(img + cur_fdt_offset, 0, 4);
-				img_size += 4;
-				data_size += 4;
-				vol_offset[VOL_FLATDT] = new_fdt_offset;
-				vol_size[VOL_RAMDISK] = htobe32( be32toh(vol_size[VOL_RAMDISK]) + 4 );
-				DBG("Multi image: volume %u size increased by 4 bytes \n", VOL_RAMDISK);
-				DBG("Multi image: volume %u has offset = 0x%08X (patched) \n", VOL_FLATDT, new_fdt_offset);
+					// for ARM64 offset of FlatDT must be 8-bytes align
+					cur_fdt_offset = vol_offset[VOL_FLATDT];
+					new_fdt_offset = vol_offset[VOL_FLATDT] + 4;
+					memmove(img + new_fdt_offset, img + cur_fdt_offset, img_size - cur_fdt_offset);
+					memset(img + cur_fdt_offset, 0, 4);
+					img_size += 4;
+					data_size += 4;
+					vol_offset[VOL_FLATDT] = new_fdt_offset;
+					vol_size[VOL_RAMDISK] = htobe32( be32toh(vol_size[VOL_RAMDISK]) + 4 );
+					DBG("Multi image: volume %u size increased by 4 bytes \n", VOL_RAMDISK);
+					DBG("Multi image: volume %u has offset = 0x%08X (patched) \n", VOL_FLATDT, new_fdt_offset);
 				}
 			}
 			fs_offset = vol_offset[VOL_RAMDISK];
@@ -670,17 +678,15 @@ int process_image(void)
 		kernel_key = img[fs_offset / 2];
 		fs_key = img[fs_offset + fs_size / 2];
 		DBG("fs_key: 0x%02X   kernel_key: 0x%02X \n", fs_key, kernel_key);
-		if (fs_key) {
-			key = kernel_key + ~fs_key;
-		} else {
-			key = (kernel_key % 3) - 3;
-		}
+		key = fs_key ? kernel_key + ~fs_key : (kernel_key % 3) - 3;
 		DBG("key = 0x%02X \n", key);
 		trx->sn = htole16((uint16_t)g_opt.buildno);
 		trx->en = htole16((uint16_t)g_opt.extendno);
 		trx->key = key;
-		if (fs_offset >= 0xFFFFFF)
+		if (fs_offset >= 0xFFFFFF) {
+			free(img);
 			ERR("kernel image size is too big (max size: 16MiB)");
+		}
 
 		trx->fs_offset = htobe32((FS_OFFSET_PREFIX << 24) + fs_offset);
 		update_iheader_crc(hdr, NULL, img_size - hsz);
@@ -703,8 +709,10 @@ int process_image(void)
 		char * cont_ptr = img + hsz + data_size;
 		foot->checksum = htobe16(asus_hash16(cont_ptr, cont_len));
 
-		if (cont_len >= (1UL << 24))
-		    ERR("Content length is too long (more than 0x%lX bytes)", 1UL << 24);
+		if (cont_len >= (1UL << 24)) {
+			free(img);
+			ERR("Content length is too long (more than 0x%lX bytes)", 1UL << 24);
+		}
 
 		foot->clen[0] = (cont_len >> 16) & 0xFF;  // 24bit BigEndian
 		foot->clen[1] = (cont_len >> 8) & 0xFF;
@@ -724,13 +732,17 @@ int process_image(void)
 	}
 
 	fp = fopen(g_opt.outfn, "wb");
-	if (!fp)
+	if (!fp) {
+		free(img);
 		ERR("Can't open %s for writing: %s", g_opt.outfn, strerror(errno));
+	}
 
 	wlen = fwrite(img, img_size, 1, fp);
 	fclose(fp);
-	if (wlen != 1)
+	if (wlen != 1) {
+		free(img);
 		ERR("Failed to write: %s", g_opt.outfn);
+	}
 
 	DBG("New TRX-image file created: \"%s\" \n", g_opt.outfn);
 	free(img);
