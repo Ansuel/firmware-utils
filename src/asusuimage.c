@@ -580,9 +580,12 @@ int process_image(void)
 	img_end = img + img_size;
 
 	memset(&hdr->tail.trx1, 0, sizeof(hdr->tail.trx1));
-	prod_name = hdr->tail.trx2.prod_name;
-	max_prod_len = sizeof(hdr->tail.trx2.prod_name);
-	if (g_opt.trx_ver == 3) {
+	switch(g_opt.trx_ver) {
+	case 2:
+		prod_name = hdr->tail.trx2.prod_name;
+		max_prod_len = sizeof(hdr->tail.trx2.prod_name);
+		break;
+	case 3:
 		prod_name = hdr->tail.trx3.prod_name;
 		max_prod_len = sizeof(hdr->tail.trx3.prod_name);
 	}
@@ -595,8 +598,8 @@ int process_image(void)
 	hdr->kernel_ver = g_opt.kernel_ver;
 	hdr->fs_ver = g_opt.fs_ver;
 
-
-	if (g_opt.trx_ver == 2) {
+	switch(g_opt.trx_ver) {
+	case 2:
 		trx = &hdr->tail.trx2;
 
 		if (hdr->ih_type == IH_TYPE_MULTI) {
@@ -699,9 +702,8 @@ int process_image(void)
 
 		trx->fs_offset = htonl((FS_OFFSET_PREFIX << 24) + fs_offset);
 		update_iheader_crc(hdr, NULL, img_size - hsz);
-    	}
-
-	if (g_opt.trx_ver == 3) {
+		break;
+	case 3:
 		cont_len = 0;
 		cont = NULL;
 		foot = NULL;
