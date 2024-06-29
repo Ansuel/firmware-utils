@@ -1,0 +1,27 @@
+name: Build firmware-utils
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-backports:
+    name: Build firmware-utils
+    runs-on: ubuntu-latest
+
+    container:
+      image: alpine:latest
+
+    steps:
+      - name: Install Dependencies
+        run: |
+          apk update && apk add cmake make gcc musl-dev openssl-dev zlib-dev
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install firmware-utils
+        run: |
+          cmake .
+          make
+          make install
