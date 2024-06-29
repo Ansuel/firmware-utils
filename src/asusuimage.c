@@ -133,24 +133,6 @@ trx_opt_t g_opt = {0};
 
 // =========================================================
 
-#if !defined(__BYTE_ORDER)
-#error "Unknown byte order"
-#endif
-
-#if __BYTE_ORDER == __BIG_ENDIAN
-#define cpu_to_le32(x)	bswap_32(x)
-#define le32_to_cpu(x)	bswap_32(x)
-#define cpu_to_le16(x)	bswap_16(x)
-#define le16_to_cpu(x)	bswap_16(x)
-#elif __BYTE_ORDER == __LITTLE_ENDIAN
-#define cpu_to_le32(x)	(x)
-#define le32_to_cpu(x)	(x)
-#define cpu_to_le16(x)	(x)
-#define le16_to_cpu(x)	(x)
-#else
-#error "Unsupported endianness"
-#endif
-
 #define ROUNDUP(x, n) (((x) + (n - 1)) & ~(n - 1))
 
 // =========================================================
@@ -195,12 +177,12 @@ void update_iheader_crc(image_header_t * hdr, const void * data, size_t data_siz
 		data = (const void *)((char *)hdr + sizeof(image_header_t));
 
 	// Calculate payload checksum
-	hdr->ih_dcrc = htonl(crc32(0, data, data_size));
-	hdr->ih_size = htonl(data_size);
+	hdr->ih_dcrc = htobe32(crc32(0, data, data_size));
+	hdr->ih_size = htobe32(data_size);
 
 	// Calculate header checksum
 	hdr->ih_hcrc = 0;
-	hdr->ih_hcrc = htonl(crc32(0, (const void *)hdr, sizeof(image_header_t)));
+	hdr->ih_hcrc = htobe32(crc32(0, (const void *)hdr, sizeof(image_header_t)));
 }
 
 static
@@ -409,16 +391,16 @@ static int show_info(char *img, size_t img_size)
 	hdr = (image_header_t *)img;
 	foot = (tail_footer_t *)(img + img_size - sizeof(tail_footer_t));
 
-	if (ntohl(hdr->ih_magic) != IH_MAGIC) {
+	if (be32toh(hdr->ih_magic) != IH_MAGIC) {
 		free(img);
 		ERR("Incorrect image: \"%s\" magic must be %08X", g_opt.imagefn, IH_MAGIC);
 	}
 
 	g_opt.trx_ver = 0;
-	if (ntohl(foot->magic) == g_opt.magic)
+	if (be32toh(foot->magic) == g_opt.magic)
 		g_opt.trx_ver = 3;  /* tail with magic = DEF_ASUS_TAIL_MAGIC */
 
-	if (ntohl(hdr->tail.trx2.fs_offset) >> 24 == FS_OFFSET_PREFIX) {
+	if (be32toh(hdr->tail.trx2.fs_offset) >> 24 == FS_OFFSET_PREFIX) {
 		g_opt.trx_ver = 1;  /* hdr1 */
 
 		for (i = 0; i < sizeof(hdr->tail.trx1.prod_name); i++) {
@@ -446,21 +428,21 @@ static int show_info(char *img, size_t img_size)
 		uint32_t *fs_data;
 		uint8_t *buf;
 
-		data_size = (uint32_t)ntohl(hdr->ih_size);
-		sn = le16_to_cpu(trx->sn);
-		en = le16_to_cpu(trx->en);
+		data_size = (uint32_t)be32toh(hdr->ih_size);
+		sn = htole16(trx->sn);
+		en = htole16(trx->en);
 
 		if (en < 20000 && sn >= 386)
 			en += 0x10000;
 
 		DBG("hdr2.sn: %u (0x%04X) \n", sn, sn);
-		DBG("hdr2.en: %u (0x%04X) \n", en, le16_to_cpu(trx->en));
+		DBG("hdr2.en: %u (0x%04X) \n", en, htole16(trx->en));
 		DBG("hdr2.key: 0x%02X \n", trx->key);
 		buf = trx->unk;
 		for (size_t i = 0; i < buf_size; i += 2) {
 			if (buf[0] == FS_OFFSET_PREFIX && (buf[3] & 3) == 0) {
 				xx = (buf[3] << 24) | (buf[2] << 16) | (buf[1] << 8) | (xx && 0xFF);
-				fs_offset = ntohl(xx);
+				fs_offset = be32toh(xx);
 				buf += 2;
 			}
 			buf += 2;
@@ -470,7 +452,7 @@ static int show_info(char *img, size_t img_size)
 			ERR("Incorrect fs_offset!");
 
 		fs_data = (uint32_t *)(img + fs_offset);
-		DBG("fs_data: %08X %08X \n", ntohl(fs_data[0]), ntohl(fs_data[1]));
+		DBG("fs_data: %08X %08X \n", be32toh(fs_data[0]), be32toh(fs_data[1]));
 		fs_size = hsz + data_size - fs_offset;
 		DBG("fs_size: 0x%X bytes \n", fs_size);
 		fs_key = img[fs_offset + fs_size / 2];
@@ -482,9 +464,9 @@ static int show_info(char *img, size_t img_size)
 			key = (kernel_key % 3) - 3;
 		}
 		DBG("key = 0x%02X \n", key);
-		if (ntohl(fs_data[0]) == FDT_MAGIC) {
+		if (be32toh(fs_data[0]) == FDT_MAGIC) {
 			DBG("fdt_offset: 0x%08X \n", fs_offset);
-			fdt_size = ntohl(fs_data[1]);
+			fdt_size = be32toh(fs_data[1]);
 			DBG("fdt_size: 0x%X bytes \n", fdt_size);
 			fs_offset += ROUNDUP(fdt_size, 64);
 			DBG("fs_offset: 0x%08X \n", fs_offset);
@@ -498,7 +480,7 @@ static int show_info(char *img, size_t img_size)
 		uint32_t cont_len;
 
 		DBG("tail: footer size = 0x%lX  (%lu) \n", sizeof(tail_footer_t), sizeof(tail_footer_t));
-		DBG("tail: footer magic: 0x%X \n", ntohl(foot->magic));
+		DBG("tail: footer magic: 0x%X \n", be32toh(foot->magic));
 
 		cont_len = foot->clen[0] << 24 | foot->clen[1] << 16 | foot->clen[2];
 		DBG("tail: type = %X, flags = %X, content len = 0x%06X \n", foot->type, foot->flags, cont_len);
@@ -506,14 +488,14 @@ static int show_info(char *img, size_t img_size)
 		fcrc = foot->fcrc;
 		foot->fcrc = 0;
 		fcrc_c = asus_hash16(foot, sizeof(*foot));
-		DBG("tail: fcrc = %04X  (%04X) \n", ntohs(fcrc), fcrc_c);
+		DBG("tail: fcrc = %04X  (%04X) \n", be16toh(fcrc), fcrc_c);
 
 		cont = (tail_content_t *)((char *)foot - cont_len);
 		checksum_c = asus_hash16(cont, sizeof(*cont));
-		DBG("cont: checksum = %04X  (%04X) \n", ntohs(foot->checksum), checksum_c);
+		DBG("cont: checksum = %04X  (%04X) \n", be16toh(foot->checksum), checksum_c);
 
-		DBG("cont: buildno: %u, extendno: %u \n", ntohs(cont->buildno), ntohl(cont->extendno));
-		DBG("cont: r16: 0x%08X, r32: 0x%08X \n", ntohs(cont->r16), ntohl(cont->r32));
+		DBG("cont: buildno: %u, extendno: %u \n", be16toh(cont->buildno), be32toh(cont->extendno));
+		DBG("cont: r16: 0x%08X, r32: 0x%08X \n", be16toh(cont->r16), be32toh(cont->r32));
 		break;
 	default:
 		free(img);
@@ -552,12 +534,12 @@ int process_image(void)
 		return show_info(img, img_size);
 
 	hdr = (image_header_t *)img;
-	if (ntohl(hdr->ih_magic) != IH_MAGIC) {
+	if (be32toh(hdr->ih_magic) != IH_MAGIC) {
 		memmove(img + hsz, img, img_size);
 		memset(hdr, 0, hsz);
-		hdr->ih_magic = htonl(IH_MAGIC);
-		hdr->ih_time = htonl(get_timestamp());
-		hdr->ih_size = htonl(img_size);
+		hdr->ih_magic = htobe32(IH_MAGIC);
+		hdr->ih_time = htobe32(get_timestamp());
+		hdr->ih_size = htobe32(img_size);
 		hdr->ih_load = 0;
 		hdr->ih_ep   = 0;
 		hdr->ih_os   = IH_OS_LINUX;
@@ -566,13 +548,13 @@ int process_image(void)
 		hdr->ih_comp = IH_COMP_NONE;
 		img_size += hsz;
 	}
-	data_size = (uint32_t)ntohl(hdr->ih_size);
+	data_size = (uint32_t)be32toh(hdr->ih_size);
 	DBG("data: size = 0x%08X  (%u bytes) \n", data_size, data_size);
 	if (data_size + hsz > img_size)
 		ERR("Bad size: \"%s\" is no valid content size", g_opt.imagefn);
 
 	data_crc_c = crc32(0, (const unsigned char *)(img + hsz), data_size);
-	DBG("data: crc = %08X  (%08X) \n", ntohl(hdr->ih_dcrc), data_crc_c);
+	DBG("data: crc = %08X  (%08X) \n", be32toh(hdr->ih_dcrc), data_crc_c);
 
 	DBG("image type: %d \n", (int)hdr->ih_type);
 
@@ -623,16 +605,16 @@ int process_image(void)
 				xoffset = ROUNDUP(xoffset, 4);
 				vol_offset[i] = xoffset;
 				DBG("Multi image: volume %u has offset = 0x%08X \n", i, xoffset);
-				if (ntohl(vol_size[i]) > 0x4FFFFFF)
+				if (be32toh(vol_size[i]) > 0x4FFFFFF)
 			    	ERR("Multi image contain volume %u with huge size", i);
 
-				xoffset += ntohl(vol_size[i]);
+				xoffset += be32toh(vol_size[i]);
 			}
 			if (xoffset > img_size)
 				ERR("Multi image contain incorrect img-size header");
 
 			fdt = (uint32_t *)(img + vol_offset[VOL_FLATDT]);
-			if (vol_offset[VOL_FLATDT] && ntohl(fdt[0]) == FDT_MAGIC) {
+			if (vol_offset[VOL_FLATDT] && be32toh(fdt[0]) == FDT_MAGIC) {
 				if (hdr->ih_arch == IH_ARCH_ARM64 && (vol_offset[VOL_FLATDT] & 7) != 0) {
 				// for ARM64 offset of FlatDT must be 8-bytes align
 				cur_fdt_offset = vol_offset[VOL_FLATDT];
@@ -642,7 +624,7 @@ int process_image(void)
 				img_size += 4;
 				data_size += 4;
 				vol_offset[VOL_FLATDT] = new_fdt_offset;
-				vol_size[VOL_RAMDISK] = htonl( ntohl(vol_size[VOL_RAMDISK]) + 4 );
+				vol_size[VOL_RAMDISK] = htobe32( be32toh(vol_size[VOL_RAMDISK]) + 4 );
 				DBG("Multi image: volume %u size increased by 4 bytes \n", VOL_RAMDISK);
 				DBG("Multi image: volume %u has offset = 0x%08X (patched) \n", VOL_FLATDT, new_fdt_offset);
 				}
@@ -667,16 +649,16 @@ int process_image(void)
 		}
 		DBG("fs_offset: 0x%08X \n", fs_offset);
 		fs_data = (uint32_t *)(img + fs_offset);
-		DBG("fs_data: %08X %08X \n", ntohl(fs_data[0]), ntohl(fs_data[1]));
+		DBG("fs_data: %08X %08X \n", be32toh(fs_data[0]), be32toh(fs_data[1]));
 		fs_size = img_size - fs_offset;
 		fdt_offset = 0;
 		fdt_size = 0;
 		hsqs_offset = fs_offset;
 		hsqs_size = fs_size;
-		if (ntohl(fs_data[0]) == FDT_MAGIC && !vol_count) {
+		if (be32toh(fs_data[0]) == FDT_MAGIC && !vol_count) {
 			fdt_offset = fs_offset;
 			DBG("fdt_offset: 0x%08X \n", fs_offset);
-			fdt_size = ntohl(fs_data[1]);
+			fdt_size = be32toh(fs_data[1]);
 			DBG("fdt_size: 0x%X bytes \n", fdt_size);
 			hsqs_offset += ROUNDUP(fdt_size, 64);
 			hsqs_size -= ROUNDUP(fdt_size, 64);
@@ -684,7 +666,7 @@ int process_image(void)
 		DBG("hsqs_offset: 0x%08X \n", hsqs_offset);
 		DBG("hsqs_size: 0x%X bytes \n", hsqs_size);
 		hsqs_data = (uint32_t *)(img + hsqs_offset);
-		DBG("hsqs_data: %08X %08X \n", ntohl(hsqs_data[0]), ntohl(hsqs_data[1]));
+		DBG("hsqs_data: %08X %08X \n", be32toh(hsqs_data[0]), be32toh(hsqs_data[1]));
 		kernel_key = img[fs_offset / 2];
 		fs_key = img[fs_offset + fs_size / 2];
 		DBG("fs_key: 0x%02X   kernel_key: 0x%02X \n", fs_key, kernel_key);
@@ -694,13 +676,13 @@ int process_image(void)
 			key = (kernel_key % 3) - 3;
 		}
 		DBG("key = 0x%02X \n", key);
-		trx->sn = cpu_to_le16((uint16_t)g_opt.buildno);
-		trx->en = cpu_to_le16((uint16_t)g_opt.extendno);
+		trx->sn = htole16((uint16_t)g_opt.buildno);
+		trx->en = htole16((uint16_t)g_opt.extendno);
 		trx->key = key;
 		if (fs_offset >= 0xFFFFFF)
 			ERR("kernel image size is too big (max size: 16MiB)");
 
-		trx->fs_offset = htonl((FS_OFFSET_PREFIX << 24) + fs_offset);
+		trx->fs_offset = htobe32((FS_OFFSET_PREFIX << 24) + fs_offset);
 		update_iheader_crc(hdr, NULL, img_size - hsz);
 		break;
 	case 3:
@@ -708,18 +690,18 @@ int process_image(void)
 		cont = NULL;
 		foot = NULL;
 
-		hdr->tail.trx3.unk1 = htonl(0x3000);  // unknown value
+		hdr->tail.trx3.unk1 = htobe32(0x3000);  // unknown value
 
 		cont_len = img_size - hsz - data_size + sizeof(tail_content_t);
 		cont = (tail_content_t *)img_end;
-		cont->extendno = htonl(g_opt.extendno);
-		cont->buildno = htons(g_opt.buildno);
-		cont->r16 = htons(g_opt.r16);
-		cont->r32 = htonl(g_opt.r32);
+		cont->extendno = htobe32(g_opt.extendno);
+		cont->buildno = htobe16(g_opt.buildno);
+		cont->r16 = htobe16(g_opt.r16);
+		cont->r32 = htobe32(g_opt.r32);
 
 		foot = (tail_footer_t *)(img_end + sizeof(tail_content_t));
 		char * cont_ptr = img + hsz + data_size;
-		foot->checksum = htons(asus_hash16(cont_ptr, cont_len));
+		foot->checksum = htobe16(asus_hash16(cont_ptr, cont_len));
 
 		if (cont_len >= (1UL << 24))
 		    ERR("Content length is too long (more than 0x%lX bytes)", 1UL << 24);
@@ -728,11 +710,11 @@ int process_image(void)
 		foot->clen[1] = (cont_len >> 8) & 0xFF;
 		foot->clen[2] = cont_len & 0xFF;
 
-		foot->magic = htonl(g_opt.magic);
+		foot->magic = htobe32(g_opt.magic);
 		foot->type = g_opt.type;
 		foot->flags = g_opt.flags;
 		foot->fcrc = 0;
-		foot->fcrc = htons(asus_hash16(foot, sizeof(*foot)));
+		foot->fcrc = htobe16(asus_hash16(foot, sizeof(*foot)));
 
 		new_img_size = (size_t)((char *)foot + sizeof(tail_footer_t) - img);
 		new_data_size = new_img_size - hsz;
